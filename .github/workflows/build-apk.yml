@@ -31,12 +31,15 @@ jobs:
       - name: Build web app
         run: npm run build
 
+      - name: Add Android platform
+        run: npx cap add android
+
       - name: Sync Capacitor
-        run: npx cap sync android
+        run: npx cap sync
 
       - name: Build APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: chmod +x ./gradlew && ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
