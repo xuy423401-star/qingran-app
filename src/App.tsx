@@ -1,0 +1,591 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { Header } from "./components/Header";
+import { BottomNavBar, TabType } from "./components/BottomNavBar";
+import { HomeTab } from "./components/HomeTab";
+import { PhotoTab } from "./components/PhotoTab";
+import { MeTab } from "./components/MeTab";
+import { CalendarDrawer } from "./components/CalendarDrawer";
+import { Meal, UserProfile, DailyDataMap } from "./types";
+import { DEFAULT_USER_PROFILE, INITIAL_MEALS, INITIAL_DAILY_DATA } from "./mockData";
+import { Check, Sparkles } from "lucide-react";
+import { supabase } from "./supabaseClient";
+import { supabaseService } from "./supabaseService";
+
+const getDateString = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const parseDateString = (dateStr: string) => {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  return new Date(year, month - 1, day);
+};
+
+const addDays = (date: Date, days: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const getTodayString = () => getDateString(new Date());
+const getTodayMonthDayString = () => {
+  const today = new Date();
+  return `${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+};
+const TODAY_STR = getTodayString();
+const emptyTodayLog = { meals: INITIAL_MEALS, hasCheckedIn: false, totalCalories: 0 };
+const LOCAL_STORAGE_KEYS = [
+  "qingran_daily_data_v1",
+  "qingran_user_profile",
+  "qingran_meals_log"
+];
+const LEGACY_DEMO_DATES = ["2026-05-22", "2026-05-23", "2026-05-24", "2026-05-25", "2026-05-26", "2026-05-27"];
+const LEGACY_DEMO_MEAL_IDS = new Set(["meal-1", "meal-2", "meal-3", "meal-old-1", "meal-old-2", "meal-old-3"]);
+
+const safeReadJson = <T,>(key: string): T | null => {
+  const rawValue = localStorage.getItem(key);
+  if (!rawValue) return null;
+
+  try {
+    return JSON.parse(rawValue) as T;
+  } catch (error) {
+    console.warn(`Failed to parse ${key}; resetting this local cache.`, error);
+    localStorage.removeItem(key);
+    return null;
+  }
+};
+
+const hasLegacyDemoProfile = (profile: Partial<UserProfile> | null) => {
+  if (!profile) return false;
+
+  const firstWeightRecord = profile.weightHistory?.[0];
+  return (
+    profile.streakCount === 12 &&
+    profile.longestStreak === 15 &&
+    profile.weekRecordsCount === 6 &&
+    profile.currentWeight === 64.5 &&
+    profile.targetWeight === 58 &&
+    firstWeightRecord?.date === "05-21" &&
+    firstWeightRecord?.weight === 66.2
+  );
+};
+
+const hasLegacyDemoDailyData = (dailyMap: DailyDataMap | null) => {
+  if (!dailyMap) return false;
+
+  const demoDateCount = LEGACY_DEMO_DATES.filter((dateStr) => Boolean(dailyMap[dateStr])).length;
+  const demoTodayTotal = dailyMap["2026-05-27"]?.totalCalories === 980;
+  const hasDemoMeal = Object.values(dailyMap).some((log) =>
+    log?.meals?.some((meal) => LEGACY_DEMO_MEAL_IDS.has(meal.id))
+  );
+
+  return demoDateCount >= 3 || demoTodayTotal || hasDemoMeal;
+};
+
+const hasLegacyDemoMeals = (mealsList: Meal[] | null) => {
+  return Boolean(mealsList?.some((meal) => LEGACY_DEMO_MEAL_IDS.has(meal.id)));
+};
+
+const shouldResetLegacyGuestData = (
+  profile: Partial<UserProfile> | null,
+  dailyMap: DailyDataMap | null,
+  mealsList: Meal[] | null
+) => {
+  return hasLegacyDemoProfile(profile) || hasLegacyDemoDailyData(dailyMap) || hasLegacyDemoMeals(mealsList);
+};
+
+const clearLocalAppData = () => {
+  LOCAL_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key));
+};
+
+const getCachedTodayCheckedIn = () => {
+  const cachedDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1");
+  const cachedProfile = safeReadJson<UserProfile>("qingran_user_profile");
+
+  return Boolean(
+    cachedDailyData?.[TODAY_STR]?.hasCheckedIn ||
+    cachedProfile?.hasCheckedInToday ||
+    cachedProfile?.lastCheckInDate === TODAY_STR
+  );
+};
+
+const calculateCurrentStreak = (dailyMap: DailyDataMap, todayStr: string) => {
+  let cursor = parseDateString(todayStr);
+  let streak = 0;
+
+  if (!dailyMap[todayStr]?.hasCheckedIn) {
+    cursor = addDays(cursor, -1);
+  }
+
+  while (streak < 3660) {
+    const cursorStr = getDateString(cursor);
+    if (!dailyMap[cursorStr]?.hasCheckedIn) break;
+    streak += 1;
+    cursor = addDays(cursor, -1);
+  }
+
+  return streak;
+};
+
+const calculateLongestStreak = (dailyMap: DailyDataMap) => {
+  const checkedDates = Object.entries(dailyMap)
+    .filter(([, log]) => log?.hasCheckedIn)
+    .map(([dateStr]) => dateStr)
+    .sort();
+
+  let longest = 0;
+  let current = 0;
+  let previousDate: Date | null = null;
+
+  checkedDates.forEach((dateStr) => {
+    const date = parseDateString(dateStr);
+    const isConsecutive = previousDate && getDateString(addDays(previousDate, 1)) === dateStr;
+
+    current = isConsecutive ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    previousDate = date;
+  });
+
+  return longest;
+};
+
+const countCurrentWeekRecords = (dailyMap: DailyDataMap, todayStr: string) => {
+  const today = parseDateString(todayStr);
+  const dayOfWeek = today.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  const monday = addDays(today, mondayOffset);
+  let count = 0;
+
+  for (let i = 0; i < 7; i += 1) {
+    const dateStr = getDateString(addDays(monday, i));
+    const log = dailyMap[dateStr];
+    if (log?.hasCheckedIn || (log?.meals?.length ?? 0) > 0) {
+      count += 1;
+    }
+  }
+
+  return count;
+};
+
+const countTotalCheckInDays = (dailyMap: DailyDataMap) => {
+  return Object.values(dailyMap).filter((log) => log?.hasCheckedIn).length;
+};
+
+const applyDailyStatsToProfile = (
+  profile: UserProfile,
+  dailyMap: DailyDataMap,
+  hasCheckedInToday: boolean
+): UserProfile => {
+  const currentStreak = calculateCurrentStreak(dailyMap, TODAY_STR);
+  const longestStreak = calculateLongestStreak(dailyMap);
+
+  return {
+    ...profile,
+    streakCount: currentStreak,
+    longestStreak: Math.max(longestStreak, currentStreak),
+    weekRecordsCount: countCurrentWeekRecords(dailyMap, TODAY_STR),
+    totalCheckInDays: countTotalCheckInDays(dailyMap),
+    hasCheckedInToday
+  };
+};
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<TabType>("home");
+  const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
+  const [meals, setMeals] = useState<Meal[]>(INITIAL_MEALS);
+  const [dailyData, setDailyData] = useState<DailyDataMap>(INITIAL_DAILY_DATA);
+  const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [sessionUser, setSessionUser] = useState<any>(null);
+
+  // Load data for the specified user or fallback to guest model
+  const loadData = async (userId: string | null) => {
+    try {
+      if (userId && supabase) {
+        const dbProfile = await supabaseService.fetchProfile(userId, DEFAULT_USER_PROFILE);
+        const todayCheckedIn = await supabaseService.fetchCheckInStatus(userId, TODAY_STR);
+        const resolvedTodayCheckedIn = todayCheckedIn || getCachedTodayCheckedIn();
+        const dbMeals = await supabaseService.fetchTodayMeals(userId, TODAY_STR);
+        const dbDailyMap = await supabaseService.fetchDailyDataMap(userId, INITIAL_DAILY_DATA);
+        const dbWeightLogs = await supabaseService.fetchWeightLogs(userId);
+        const todayCalories = dbMeals.reduce((sum, meal) => sum + meal.totalCalories, 0);
+        const normalizedDailyMap = {
+          ...dbDailyMap,
+          [TODAY_STR]: {
+            meals: dbMeals,
+            hasCheckedIn: resolvedTodayCheckedIn,
+            totalCalories: todayCalories
+          }
+        };
+        const latestWeightLog = dbWeightLogs[dbWeightLogs.length - 1];
+        const profileWithCloudWeight = {
+          ...dbProfile,
+          currentWeight: latestWeightLog?.weight ?? dbProfile.currentWeight,
+          weightHistory: dbWeightLogs.length > 0 ? dbWeightLogs : dbProfile.weightHistory
+        };
+
+        if (resolvedTodayCheckedIn && !todayCheckedIn) {
+          await supabaseService.saveCheckInStatus(userId, TODAY_STR, true);
+        }
+
+        setUserProfile(applyDailyStatsToProfile(profileWithCloudWeight, normalizedDailyMap, resolvedTodayCheckedIn));
+        setMeals(dbMeals);
+        setDailyData(normalizedDailyMap);
+      } else {
+        let currentDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1") || INITIAL_DAILY_DATA;
+        let storedProfile = safeReadJson<UserProfile>("qingran_user_profile");
+        const storedMeals = safeReadJson<Meal[]>("qingran_meals_log");
+
+        if (shouldResetLegacyGuestData(storedProfile, currentDailyData, storedMeals)) {
+          clearLocalAppData();
+          currentDailyData = INITIAL_DAILY_DATA;
+          storedProfile = null;
+        }
+
+        localStorage.setItem("qingran_daily_data_v1", JSON.stringify(currentDailyData));
+        setDailyData(currentDailyData);
+
+        const todayLog = currentDailyData[TODAY_STR] || emptyTodayLog;
+        setMeals(todayLog.meals);
+
+        const nextProfile = storedProfile
+          ? { ...DEFAULT_USER_PROFILE, ...storedProfile }
+          : DEFAULT_USER_PROFILE;
+        setUserProfile(applyDailyStatsToProfile(nextProfile, currentDailyData, todayLog.hasCheckedIn));
+      }
+    } catch (e) {
+      console.warn("Failed to retrieve dataset comfortably, fallback to static values working fine:", e);
+    }
+  };
+
+  // Auth session listener
+  useEffect(() => {
+    if (supabase) {
+      // Get initial authentication credentials
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        setSessionUser(session?.user ?? null);
+      });
+
+      // Bind listener
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        setSessionUser(session?.user ?? null);
+      });
+
+      return () => subscription.unsubscribe();
+    }
+  }, []);
+
+  // Reload dataset whenever user toggles
+  useEffect(() => {
+    loadData(sessionUser?.id ?? null);
+  }, [sessionUser]);
+
+  // Save to localStorage and keep daily data map in sync
+  const saveProfile = async (updatedProfile: UserProfile, currentMealsList?: Meal[]) => {
+    const activeMeals = currentMealsList !== undefined ? currentMealsList : meals;
+    const totalCalSum = activeMeals.reduce((sum, m) => sum + m.totalCalories, 0);
+    const nextMap = {
+      ...dailyData,
+      [TODAY_STR]: {
+        meals: activeMeals,
+        hasCheckedIn: updatedProfile.hasCheckedInToday,
+        totalCalories: totalCalSum
+      }
+    };
+    const profileToSave = applyDailyStatsToProfile(updatedProfile, nextMap, updatedProfile.hasCheckedInToday);
+
+    setDailyData(nextMap);
+    setUserProfile(profileToSave);
+    localStorage.setItem("qingran_daily_data_v1", JSON.stringify(nextMap));
+    localStorage.setItem("qingran_user_profile", JSON.stringify(profileToSave));
+
+    // Cloud saving integration
+    if (sessionUser?.id) {
+      try {
+        await supabaseService.saveProfile(sessionUser.id, profileToSave);
+      } catch (err) {
+        console.warn("Could not save profile preferences to Supabase:", err);
+      }
+    }
+  };
+
+  const saveMeals = async (updatedMeals: Meal[]) => {
+    setMeals(updatedMeals);
+    localStorage.setItem("qingran_meals_log", JSON.stringify(updatedMeals));
+
+    const totalCalSum = updatedMeals.reduce((sum, m) => sum + m.totalCalories, 0);
+
+    setDailyData(prev => {
+      const todayHasCheckedIn = Boolean(
+        prev[TODAY_STR]?.hasCheckedIn ||
+        userProfile.hasCheckedInToday ||
+        userProfile.lastCheckInDate === TODAY_STR ||
+        getCachedTodayCheckedIn()
+      );
+      const nextMap = {
+        ...prev,
+        [TODAY_STR]: {
+          meals: updatedMeals,
+          hasCheckedIn: todayHasCheckedIn,
+          totalCalories: totalCalSum
+        }
+      };
+
+      localStorage.setItem("qingran_daily_data_v1", JSON.stringify(nextMap));
+      setUserProfile(currentProfile => {
+        const syncedProfile = applyDailyStatsToProfile(currentProfile, nextMap, todayHasCheckedIn);
+        localStorage.setItem("qingran_user_profile", JSON.stringify(syncedProfile));
+        return syncedProfile;
+      });
+      return nextMap;
+    });
+  };
+
+  // Toast notifier helper
+  const triggerToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 2800);
+  };
+
+  // 1. Action: Complete punch-in toggle
+  const handleCheckIn = async () => {
+    if (userProfile.hasCheckedInToday) {
+      // Undo check-in for playground friendliness
+      const updated: UserProfile = {
+        ...userProfile,
+        hasCheckedInToday: false,
+        streakCount: Math.max(0, userProfile.streakCount - 1),
+        lastCheckInDate: null
+      };
+      await saveProfile(updated);
+      if (sessionUser?.id) {
+        await supabaseService.saveCheckInStatus(sessionUser.id, TODAY_STR, false);
+      }
+      triggerToast("已取消今日打卡状态 🌿");
+    } else {
+      // Complete check-in, increment streak
+      const updated: UserProfile = {
+        ...userProfile,
+        hasCheckedInToday: true,
+        streakCount: userProfile.streakCount + 1,
+        longestStreak: Math.max(userProfile.longestStreak, userProfile.streakCount + 1),
+        lastCheckInDate: TODAY_STR
+      };
+      await saveProfile(updated);
+      if (sessionUser?.id) {
+        await supabaseService.saveCheckInStatus(sessionUser.id, TODAY_STR, true);
+      }
+      triggerToast("打卡成功！坚持就是胜利 🎉");
+    }
+  };
+
+  // 2. Action: Register newly recognized diet meals from PhotoTab
+  const handleSaveMeal = async (newMeal: Meal) => {
+    const updatedMeals = [newMeal, ...meals];
+    await saveMeals(updatedMeals);
+
+    if (sessionUser?.id) {
+      try {
+        const savedToCloud = await supabaseService.saveMeal(sessionUser.id, TODAY_STR, newMeal);
+        if (!savedToCloud) {
+          triggerToast("本地已保存，但云端同步失败，请检查 Supabase 表结构/RLS");
+          return;
+        }
+      } catch (err) {
+        console.warn("Offline/Cloud Sync saved meal query anomaly:", err);
+        triggerToast("本地已保存，但云端同步失败，请稍后重试");
+        return;
+      }
+    }
+
+    // Notify user
+    triggerToast(`已添加这餐到今日饮食 🍽️ (+${newMeal.totalCalories} kcal)`);
+    // Back to dashboard
+    setActiveTab("home");
+  };
+
+  // 3. Action: Delete a logged dietary meal
+  const handleDeleteMeal = async (mealId: string) => {
+    const updatedMeals = meals.filter((m) => m.id !== mealId);
+    await saveMeals(updatedMeals);
+
+    if (sessionUser?.id) {
+      try {
+        await supabaseService.deleteMeal(sessionUser.id, mealId);
+      } catch (err) {
+        console.warn("Offline/Cloud Sync delete meal query anomaly:", err);
+      }
+    }
+    triggerToast("已成功删除该餐记录");
+  };
+
+  // 4. Action: Save custom health adjustments (weight, targets, reminder)
+  const handleUpdateProfile = async (updated: UserProfile) => {
+    const todayMonthDay = getTodayMonthDayString();
+    const shouldRecordWeight = updated.currentWeight > 0;
+    const historyWithoutToday = updated.weightHistory.filter((record) => record.date !== todayMonthDay);
+    const normalizedProfile = {
+      ...updated,
+      weightHistory: shouldRecordWeight
+        ? [...historyWithoutToday, { date: todayMonthDay, weight: updated.currentWeight }].slice(-10)
+        : historyWithoutToday
+    };
+
+    await saveProfile(normalizedProfile);
+    if (sessionUser?.id && normalizedProfile.currentWeight > 0) {
+      await supabaseService.saveWeightLog(sessionUser.id, TODAY_STR, normalizedProfile.currentWeight);
+    }
+    triggerToast(sessionUser?.id ? "参数与体重已同步到云端 🍃" : "参数已保存在本地 🍃");
+  };
+
+  // 5. Action: Download Backup state values as formatted plain text .json file
+  const handleExportData = () => {
+    try {
+      const stateBackup = {
+        exportedAt: new Date().toISOString(),
+        profile: userProfile,
+        dietLogs: meals
+      };
+
+      const jsonStr = JSON.stringify(stateBackup, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const downloadUrl = URL.createObjectURL(blob);
+      
+      const tempLink = document.createElement("a");
+      tempLink.href = downloadUrl;
+      tempLink.download = `qingran_backup_${new Date().toISOString().split("T")[0]}.json`;
+      document.body.appendChild(tempLink);
+      tempLink.click();
+      document.body.removeChild(tempLink);
+      
+      triggerToast("打卡数据已成功打包导出 📥");
+    } catch (err) {
+      console.error(err);
+      triggerToast("导出失败，请重试");
+    }
+  };
+
+  // Dynamic header titles based on selection
+  const getHeaderTitle = () => {
+    switch (activeTab) {
+      case "home":
+        return "轻燃打卡";
+      case "photo":
+        return "AI 拍照记录";
+      case "me":
+        return "我的状态";
+      default:
+        return "轻燃";
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#eae8e4]/50 flex items-center justify-center font-sans">
+      {/* 
+        Aesthetic Phone Shell wrapper for desktop. 
+        Expands fully to seamless cover on actual mobile devices.
+      */}
+      <div className="w-full sm:max-w-md min-h-screen sm:min-h-[850px] sm:h-[880px] sm:max-h-[92%] sm:rounded-[40px] sm:border-[10px] sm:border-[#30312e] bg-[#fbf9f5] shadow-2xl flex flex-col overflow-hidden relative sm:my-4">
+        
+        {/* Simulating physical Notch / status bar space on desktops */}
+        <div className="hidden sm:flex bg-[#30312e] text-white/50 text-[10px] items-center justify-between px-8 py-1.5 font-bold tracking-tight select-none">
+          <span>09:41</span>
+          <div className="w-24 h-4 bg-black rounded-full absolute left-1/2 -translate-x-1/2 top-1 flex items-center justify-center">
+            <span className="w-2 h-2 rounded-full bg-camera-green/10"></span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span>5G</span>
+            <div className="w-4 h-2 bg-white/40 rounded-xs"></div>
+          </div>
+        </div>
+
+        {/* Dynamic header navigation */}
+        <Header
+          title={getHeaderTitle()}
+          showBack={activeTab === "photo"}
+          onBackClick={() => setActiveTab("home")}
+          onProfileClick={() => setActiveTab("me")}
+          onCalendarClick={() => setIsCalendarOpen(true)}
+        />
+
+        {/* Prime scrollable tabs interface */}
+        <main className="flex-1 overflow-y-auto px-5 pt-2 pb-24 no-scrollbar relative">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              transition={{ duration: 0.18, ease: "easeInOut" }}
+              className="h-full"
+            >
+              {activeTab === "home" && (
+                <HomeTab
+                  userProfile={userProfile}
+                  meals={meals}
+                  onCheckIn={handleCheckIn}
+                  onNavigateToPhoto={() => setActiveTab("photo")}
+                  onDeleteMeal={handleDeleteMeal}
+                />
+              )}
+
+              {activeTab === "photo" && (
+                <PhotoTab
+                  onSaveMeal={handleSaveMeal}
+                  onCancel={() => setActiveTab("home")}
+                />
+              )}
+
+              {activeTab === "me" && (
+                <MeTab
+                  userProfile={userProfile}
+                  onUpdateProfile={handleUpdateProfile}
+                  onExportData={handleExportData}
+                  sessionUser={sessionUser}
+                />
+              )}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        {/* Global Floating Toast Notifier */}
+        <AnimatePresence>
+          {toastMessage && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 10 }}
+              className="absolute bottom-20 left-4 right-4 z-50 bg-[#1d4f3c]/95 backdrop-blur-xs text-white p-3.5 rounded-xl shadow-lg border border-[#fe7e4f]/20 flex items-center gap-2"
+            >
+              <div className="w-5 h-5 rounded-full bg-[#fe7e4f]/20 flex items-center justify-center flex-shrink-0">
+                <Check className="w-3 h-3 text-[#fe7e4f]" />
+              </div>
+              <p className="text-xs font-bold leading-tight">{toastMessage}</p>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Dynamic footer Navbar */}
+        <BottomNavBar activeTab={activeTab} onTabChange={setActiveTab} />
+
+        {/* History Calendar Bottom Sheet Drawer */}
+        <CalendarDrawer
+          isOpen={isCalendarOpen}
+          onClose={() => setIsCalendarOpen(false)}
+          dailyData={dailyData}
+          userProfile={userProfile}
+        />
+      </div>
+    </div>
+  );
+}

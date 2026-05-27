@@ -1,0 +1,25 @@
+﻿{
+  "name": "轻燃 - 减脂打卡",
+  "short_name": "轻燃",
+  "description": "极简 AI 减脂打卡应用，拍照识别食物热量，记录饮食与体重",
+  "start_url": "/qingran-app/",
+  "scope": "/qingran-app/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#1d4f3c",
+  "background_color": "#fbf9f5",
+  "categories": ["health", "fitness", "lifestyle"],
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
