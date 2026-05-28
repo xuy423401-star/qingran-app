@@ -41,6 +41,7 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
   const [newItemWeight, setNewItemWeight] = useState("");
   const [showAddForm, setShowAddForm] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [isSavingMeal, setIsSavingMeal] = useState(false);
 
 
 
@@ -200,6 +201,8 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
 
   // Trigger Save action
   const handleSaveMealClick = () => {
+    if (isSavingMeal) return;
+
     if (foodItems.length === 0) {
       alert("本餐列表为空，请先拍照识别或手动添加食物记录！");
       return;
@@ -245,6 +248,7 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
       tags: confirmedFoodNames.length > 0 ? confirmedFoodNames : ["待确认"]
     };
 
+    setIsSavingMeal(true);
     onSaveMeal(generatedMeal);
   };
 
@@ -529,11 +533,16 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
         <div className="mt-8 mb-12 flex flex-col gap-2 p-1">
           <button
             onClick={handleSaveMealClick}
+            disabled={isSavingMeal}
             id="btn-photo-save"
-            className="w-full bg-[#1d4f3c] hover:bg-[#1d4f3c]/95 text-white py-4 rounded-xl font-bold text-base shadow-sm active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            className="w-full bg-[#1d4f3c] hover:bg-[#1d4f3c]/95 text-white py-4 rounded-xl font-bold text-base shadow-sm active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-70 disabled:cursor-wait"
           >
-            <Check className="w-4 h-4 text-[#fe7e4f]" />
-            保存到今日饮食
+            {isSavingMeal ? (
+              <Loader2 className="w-4 h-4 text-[#fe7e4f] animate-spin" />
+            ) : (
+              <Check className="w-4 h-4 text-[#fe7e4f]" />
+            )}
+            {isSavingMeal ? "\u4fdd\u5b58\u4e2d..." : "\u4fdd\u5b58\u5230\u4eca\u65e5\u996e\u98df"}
           </button>
           {resultSource === "photo" ? (
             <p className="text-center text-[#424843]/50 text-[10px] font-medium leading-relaxed">

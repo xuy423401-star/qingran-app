@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Header } from "./components/Header";
 import { BottomNavBar, TabType } from "./components/BottomNavBar";
@@ -232,6 +232,7 @@ export default function App() {
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [sessionUser, setSessionUser] = useState<any>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   const getActiveUserId = async () => {
     if (!supabase) return sessionUser?.id ?? null;
@@ -442,7 +443,14 @@ export default function App() {
 
     const persistSnapshot = (snapshot: ReturnType<typeof buildSnapshot>) => {
       const lightMealsCache = stripInlineImages(snapshot.mealList);
-      const wroteDailyData = writeJsonToLocalStorage("qingran_daily_data_v1", snapshot.nextMap);
+      const lightDailyMap = {
+        ...snapshot.nextMap,
+        [TODAY_STR]: {
+          ...snapshot.nextMap[TODAY_STR],
+          meals: lightMealsCache
+        }
+      };
+      const wroteDailyData = writeJsonToLocalStorage("qingran_daily_data_v1", lightDailyMap);
       const wroteProfile = writeJsonToLocalStorage("qingran_user_profile", snapshot.nextProfile);
       const wroteMealsCache = writeJsonToLocalStorage("qingran_meals_log", lightMealsCache);
 
@@ -472,11 +480,16 @@ export default function App() {
   };
 
   // Toast notifier helper
-  const triggerToast = (msg: string) => {
+  const triggerToast = (msg: string, durationMs = 3600) => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+
     setToastMessage(msg);
-    setTimeout(() => {
+    toastTimerRef.current = window.setTimeout(() => {
       setToastMessage(null);
-    }, 2800);
+      toastTimerRef.current = null;
+    }, durationMs);
   };
 
   // 1. Action: Complete punch-in toggle
@@ -525,23 +538,23 @@ export default function App() {
     triggerToast(
       localSaveResult.droppedImages
         ? `\u9910\u98df\u5df2\u4fdd\u5b58\uff0c\u4f46\u56fe\u7247\u56e0\u672c\u5730\u7a7a\u95f4\u4e0d\u8db3\u672a\u4fdd\u7559 (+${newMeal.totalCalories} kcal)`
-        : `\u9910\u98df\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u540c\u6b65\u4e91\u7aef (+${newMeal.totalCalories} kcal)`
+        : `\u672c\u5730\u4fdd\u5b58\u6210\u529f\uff0c\u6b63\u5728\u4e0a\u4f20\u4e91\u7aef (+${newMeal.totalCalories} kcal)`
     );
 
     void (async () => {
       const activeUserIdForSync = await getActiveUserId();
       if (!activeUserIdForSync) {
-        triggerToast("\u5df2\u4fdd\u5b58\u5230\u672c\u5730\uff0c\u5f53\u524d\u672a\u767b\u5f55\u4e91\u7aef\u8d26\u53f7");
+        triggerToast("\u5df2\u4fdd\u5b58\u5230\u672c\u5730\uff0c\u5f53\u524d\u672a\u767b\u5f55\u4e91\u7aef\u8d26\u53f7", 5200);
         return;
       }
 
       const savedToCloud = await supabaseService.saveMeal(activeUserIdForSync, TODAY_STR, newMeal);
       if (!savedToCloud.ok) {
-        triggerToast(`\u672c\u5730\u5df2\u4fdd\u5b58\uff0c\u4e91\u7aef\u540c\u6b65\u5931\u8d25\uff1a${savedToCloud.message || "\u8bf7\u68c0\u67e5 Supabase"}`);
+        triggerToast(`\u672c\u5730\u5df2\u4fdd\u5b58\uff0c\u4e91\u7aef\u4e0a\u4f20\u5931\u8d25\uff1a${savedToCloud.message || "\u8bf7\u68c0\u67e5 Supabase"}`, 6200);
         return;
       }
 
-      triggerToast(`\u5df2\u540c\u6b65\u5230\u4e91\u7aef (+${newMeal.totalCalories} kcal)`);
+      triggerToast(`\u4e91\u7aef\u4e0a\u4f20\u6210\u529f (+${newMeal.totalCalories} kcal)`, 5200);
     })();
 
     return;
