@@ -209,6 +209,21 @@ const mergeMealsById = (primaryMeals: Meal[], secondaryMeals: Meal[]) => {
   return merged;
 };
 
+const hasInlineImage = (meal: Meal) => typeof meal.imageUrl === "string" && meal.imageUrl.startsWith("data:");
+
+const stripInlineImages = (mealList: Meal[]) =>
+  mealList.map((meal) => (hasInlineImage(meal) ? { ...meal, imageUrl: undefined } : meal));
+
+const writeJsonToLocalStorage = (key: string, value: unknown) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (error) {
+    console.warn(`Failed to persist ${key} to localStorage.`, error);
+    return false;
+  }
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>("home");
   const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
@@ -402,36 +417,58 @@ export default function App() {
     }
   };
 
-  const saveMeals = async (updatedMeals: Meal[]) => {
-    setMeals(updatedMeals);
-    localStorage.setItem("qingran_meals_log", JSON.stringify(updatedMeals));
+  const saveMeals = (updatedMeals: Meal[]) => {
+    const totalCalSum = updatedMeals.reduce((sum, m) => sum + (Number(m.totalCalories) || 0), 0);
+    const todayHasCheckedIn = Boolean(
+      dailyData[TODAY_STR]?.hasCheckedIn ||
+      userProfile.hasCheckedInToday ||
+      userProfile.lastCheckInDate === TODAY_STR ||
+      getCachedTodayCheckedIn()
+    );
 
-    const totalCalSum = updatedMeals.reduce((sum, m) => sum + m.totalCalories, 0);
-
-    setDailyData(prev => {
-      const todayHasCheckedIn = Boolean(
-        prev[TODAY_STR]?.hasCheckedIn ||
-        userProfile.hasCheckedInToday ||
-        userProfile.lastCheckInDate === TODAY_STR ||
-        getCachedTodayCheckedIn()
-      );
+    const buildSnapshot = (mealList: Meal[]) => {
       const nextMap = {
-        ...prev,
+        ...dailyData,
         [TODAY_STR]: {
-          meals: updatedMeals,
+          meals: mealList,
           hasCheckedIn: todayHasCheckedIn,
           totalCalories: totalCalSum
         }
       };
+      const nextProfile = applyDailyStatsToProfile(userProfile, nextMap, todayHasCheckedIn);
 
-      localStorage.setItem("qingran_daily_data_v1", JSON.stringify(nextMap));
-      setUserProfile(currentProfile => {
-        const syncedProfile = applyDailyStatsToProfile(currentProfile, nextMap, todayHasCheckedIn);
-        localStorage.setItem("qingran_user_profile", JSON.stringify(syncedProfile));
-        return syncedProfile;
-      });
-      return nextMap;
-    });
+      return { mealList, nextMap, nextProfile };
+    };
+
+    const persistSnapshot = (snapshot: ReturnType<typeof buildSnapshot>) => {
+      const lightMealsCache = stripInlineImages(snapshot.mealList);
+      const wroteDailyData = writeJsonToLocalStorage("qingran_daily_data_v1", snapshot.nextMap);
+      const wroteProfile = writeJsonToLocalStorage("qingran_user_profile", snapshot.nextProfile);
+      const wroteMealsCache = writeJsonToLocalStorage("qingran_meals_log", lightMealsCache);
+
+      return wroteDailyData && wroteProfile && wroteMealsCache;
+    };
+
+    let snapshot = buildSnapshot(updatedMeals);
+    let droppedImages = false;
+    let persisted = persistSnapshot(snapshot);
+
+    if (!persisted && updatedMeals.some(hasInlineImage)) {
+      const imageLightMeals = stripInlineImages(updatedMeals);
+      snapshot = buildSnapshot(imageLightMeals);
+      droppedImages = true;
+      persisted = persistSnapshot(snapshot);
+    }
+
+    if (!persisted) {
+      return { ok: false, droppedImages };
+    }
+
+    setMeals(snapshot.mealList);
+    setDailyData(snapshot.nextMap);
+    setUserProfile(snapshot.nextProfile);
+
+    return { ok: true, droppedImages };
   };
 
   // Toast notifier helper
@@ -477,7 +514,37 @@ export default function App() {
   // 2. Action: Register newly recognized diet meals from PhotoTab
   const handleSaveMeal = async (newMeal: Meal) => {
     const nextMealsForSave = [newMeal, ...meals];
-    await saveMeals(nextMealsForSave);
+    const localSaveResult = saveMeals(nextMealsForSave);
+
+    if (!localSaveResult.ok) {
+      triggerToast("\u672c\u5730\u7a7a\u95f4\u4e0d\u8db3\uff0c\u8fd9\u6761\u9910\u98df\u8fd8\u6ca1\u6709\u4fdd\u5b58\u6210\u529f");
+      return;
+    }
+
+    setActiveTab("home");
+    triggerToast(
+      localSaveResult.droppedImages
+        ? `\u9910\u98df\u5df2\u4fdd\u5b58\uff0c\u4f46\u56fe\u7247\u56e0\u672c\u5730\u7a7a\u95f4\u4e0d\u8db3\u672a\u4fdd\u7559 (+${newMeal.totalCalories} kcal)`
+        : `\u9910\u98df\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u540c\u6b65\u4e91\u7aef (+${newMeal.totalCalories} kcal)`
+    );
+
+    void (async () => {
+      const activeUserIdForSync = await getActiveUserId();
+      if (!activeUserIdForSync) {
+        triggerToast("\u5df2\u4fdd\u5b58\u5230\u672c\u5730\uff0c\u5f53\u524d\u672a\u767b\u5f55\u4e91\u7aef\u8d26\u53f7");
+        return;
+      }
+
+      const savedToCloud = await supabaseService.saveMeal(activeUserIdForSync, TODAY_STR, newMeal);
+      if (!savedToCloud.ok) {
+        triggerToast(`\u672c\u5730\u5df2\u4fdd\u5b58\uff0c\u4e91\u7aef\u540c\u6b65\u5931\u8d25\uff1a${savedToCloud.message || "\u8bf7\u68c0\u67e5 Supabase"}`);
+        return;
+      }
+
+      triggerToast(`\u5df2\u540c\u6b65\u5230\u4e91\u7aef (+${newMeal.totalCalories} kcal)`);
+    })();
+
+    return;
 
     const activeUserId = await getActiveUserId();
     if (!activeUserId) {
@@ -523,7 +590,11 @@ export default function App() {
   // 3. Action: Delete a logged dietary meal
   const handleDeleteMeal = async (mealId: string) => {
     const updatedMeals = meals.filter((m) => m.id !== mealId);
-    await saveMeals(updatedMeals);
+    const localSaveResult = saveMeals(updatedMeals);
+    if (!localSaveResult.ok) {
+      triggerToast("\u672c\u5730\u7a7a\u95f4\u4e0d\u8db3\uff0c\u5220\u9664\u540e\u7684\u6570\u636e\u672a\u80fd\u5199\u5165");
+      return;
+    }
 
     if (sessionUser?.id) {
       try {

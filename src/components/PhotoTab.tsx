@@ -44,23 +44,23 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
 
 
 
-  // Resize image to max 1024px to stay under Edge Function 6MB payload limit
+  // Resize image before recognition and saving so mobile storage is not filled by camera originals.
   const resizeImage = (dataUrl: string, maxWidth: number): Promise<string> => {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const img = new window.Image();
       img.onload = () => {
-        if (img.width <= maxWidth) {
+        if (img.width <= maxWidth && dataUrl.length < 450000) {
           resolve(dataUrl);
           return;
         }
         const canvas = document.createElement("canvas");
-        const ratio = maxWidth / img.width;
-        canvas.width = maxWidth;
+        const ratio = Math.min(1, maxWidth / img.width);
+        canvas.width = Math.round(img.width * ratio);
         canvas.height = Math.round(img.height * ratio);
         const ctx = canvas.getContext("2d");
         if (!ctx) { resolve(dataUrl); return; }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.75));
+        resolve(canvas.toDataURL("image/jpeg", 0.62));
       };
       img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
@@ -68,13 +68,13 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
   };
   const recognizeFoodFromPhoto = async (imageBase64: string) => {
     setIsRecognizing(true);
-    setImagePreview(imageBase64);
     setResultSource("photo");
     setShowAddForm(false);
+    setAiError(null);
 
     try {
-      // Compress image before sending to avoid payload size issues
-      const compressed = await resizeImage(imageBase64, 1024);
+      const compressed = await resizeImage(imageBase64, 960);
+      setImagePreview(compressed);
       const funcUrl = `${getSupabaseUrl()}/functions/v1/food-recognize`;
       const anonKey = getSupabaseAnonKey();
       const resp = await fetch(funcUrl, {
