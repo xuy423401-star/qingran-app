@@ -214,13 +214,49 @@ const hasInlineImage = (meal: Meal) => typeof meal.imageUrl === "string" && meal
 const stripInlineImages = (mealList: Meal[]) =>
   mealList.map((meal) => (hasInlineImage(meal) ? { ...meal, imageUrl: undefined } : meal));
 
+const stripInlineImagesFromDailyData = (dailyMap: DailyDataMap) => {
+  return Object.entries(dailyMap).reduce<DailyDataMap>((acc, [dateStr, log]) => {
+    const mealsForStorage = stripInlineImages(Array.isArray(log?.meals) ? log.meals : []);
+    acc[dateStr] = {
+      meals: mealsForStorage,
+      hasCheckedIn: Boolean(log?.hasCheckedIn),
+      totalCalories: mealsForStorage.reduce((sum, meal) => sum + (Number(meal.totalCalories) || 0), 0)
+    };
+    return acc;
+  }, {});
+};
+
 const writeJsonToLocalStorage = (key: string, value: unknown) => {
+  const serialized = JSON.stringify(value);
+
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(key, serialized);
     return true;
   } catch (error) {
-    console.warn(`Failed to persist ${key} to localStorage.`, error);
-    return false;
+    console.warn(`Failed to persist ${key} to localStorage. Retrying after clearing this key.`, error);
+    try {
+      localStorage.removeItem(key);
+      localStorage.setItem(key, serialized);
+      return true;
+    } catch (retryError) {
+      console.warn(`Retry failed for ${key}.`, retryError);
+      return false;
+    }
+  }
+};
+
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
   }
 };
 
@@ -253,13 +289,16 @@ export default function App() {
   const loadLocalSnapshot = () => {
     let currentDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1") || INITIAL_DAILY_DATA;
     let storedProfile = safeReadJson<UserProfile>("qingran_user_profile");
-    const storedMeals = safeReadJson<Meal[]>("qingran_meals_log");
+    let storedMeals = safeReadJson<Meal[]>("qingran_meals_log");
 
     if (shouldResetLegacyGuestData(storedProfile, currentDailyData, storedMeals)) {
       clearLocalAppData();
       currentDailyData = INITIAL_DAILY_DATA;
       storedProfile = null;
     }
+
+    currentDailyData = stripInlineImagesFromDailyData(currentDailyData);
+    storedMeals = Array.isArray(storedMeals) ? stripInlineImages(storedMeals) : storedMeals;
 
     const fallbackMeals = Array.isArray(storedMeals) ? storedMeals : [];
     const todayLogFromMap = currentDailyData[TODAY_STR];
@@ -293,9 +332,9 @@ export default function App() {
 
   const applyLocalSnapshotToState = () => {
     const localSnapshot = loadLocalSnapshot();
-    localStorage.setItem("qingran_daily_data_v1", JSON.stringify(localSnapshot.dailyData));
-    localStorage.setItem("qingran_user_profile", JSON.stringify(localSnapshot.profile));
-    localStorage.setItem("qingran_meals_log", JSON.stringify(localSnapshot.meals));
+    writeJsonToLocalStorage("qingran_daily_data_v1", localSnapshot.dailyData);
+    writeJsonToLocalStorage("qingran_user_profile", localSnapshot.profile);
+    writeJsonToLocalStorage("qingran_meals_log", localSnapshot.meals);
 
     setDailyData(localSnapshot.dailyData);
     setMeals(localSnapshot.meals);
@@ -352,8 +391,11 @@ export default function App() {
           }
         }
 
-        localStorage.setItem("qingran_daily_data_v1", JSON.stringify(normalizedDailyMap));
-        localStorage.setItem("qingran_meals_log", JSON.stringify(resolvedMeals));
+        const storageMeals = stripInlineImages(resolvedMeals);
+        const storageDailyMap = stripInlineImagesFromDailyData(normalizedDailyMap);
+
+        writeJsonToLocalStorage("qingran_daily_data_v1", storageDailyMap);
+        writeJsonToLocalStorage("qingran_meals_log", storageMeals);
 
         setUserProfile(applyDailyStatsToProfile(profileWithCloudWeight, normalizedDailyMap, resolvedTodayCheckedIn));
         setMeals(resolvedMeals);
@@ -531,7 +573,7 @@ export default function App() {
 
     if (!localSaveResult.ok) {
       triggerToast("\u672c\u5730\u7a7a\u95f4\u4e0d\u8db3\uff0c\u8fd9\u6761\u9910\u98df\u8fd8\u6ca1\u6709\u4fdd\u5b58\u6210\u529f");
-      return;
+      return false;
     }
 
     setActiveTab("home");
@@ -548,7 +590,14 @@ export default function App() {
         return;
       }
 
-      const savedToCloud = await supabaseService.saveMeal(activeUserIdForSync, TODAY_STR, newMeal);
+      const savedToCloud = await withTimeout(
+        supabaseService.saveMeal(activeUserIdForSync, TODAY_STR, newMeal),
+        12000,
+        "\u4e91\u7aef\u4e0a\u4f20\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5\u624b\u673a\u7f51\u7edc"
+      ).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error)
+      }));
       if (!savedToCloud.ok) {
         triggerToast(`\u672c\u5730\u5df2\u4fdd\u5b58\uff0c\u4e91\u7aef\u4e0a\u4f20\u5931\u8d25\uff1a${savedToCloud.message || "\u8bf7\u68c0\u67e5 Supabase"}`, 6200);
         return;
@@ -557,47 +606,7 @@ export default function App() {
       triggerToast(`\u4e91\u7aef\u4e0a\u4f20\u6210\u529f (+${newMeal.totalCalories} kcal)`, 5200);
     })();
 
-    return;
-
-    const activeUserId = await getActiveUserId();
-    if (!activeUserId) {
-      triggerToast("本地已保存，但当前未登录云端账号，请先到我的页面登录");
-      setActiveTab("home");
-      return;
-    }
-
-    const savedToCloudResult = await supabaseService.saveMeal(activeUserId, TODAY_STR, newMeal);
-    if (!savedToCloudResult.ok) {
-      triggerToast(`本地已保存，云端失败：${savedToCloudResult.message || "请检查 Supabase 表或 RLS"}`);
-      setActiveTab("home");
-      return;
-    }
-
-    triggerToast(`已添加并同步到云端 (+${newMeal.totalCalories} kcal)`);
-    setActiveTab("home");
-    return;
-
-    const updatedMeals = [newMeal, ...meals];
-    await saveMeals(updatedMeals);
-
-    if (sessionUser?.id) {
-      try {
-        const savedToCloud = await supabaseService.saveMeal(sessionUser.id, TODAY_STR, newMeal);
-        if (!savedToCloud) {
-          triggerToast("本地已保存，但云端同步失败，请检查 Supabase 表结构/RLS");
-          return;
-        }
-      } catch (err) {
-        console.warn("Offline/Cloud Sync saved meal query anomaly:", err);
-        triggerToast("本地已保存，但云端同步失败，请稍后重试");
-        return;
-      }
-    }
-
-    // Notify user
-    triggerToast(`已添加这餐到今日饮食 🍽️ (+${newMeal.totalCalories} kcal)`);
-    // Back to dashboard
-    setActiveTab("home");
+    return true;
   };
 
   // 3. Action: Delete a logged dietary meal

@@ -22,7 +22,7 @@ const createUuid = () => {
 };
 
 interface PhotoTabProps {
-  onSaveMeal: (meal: Meal) => void;
+  onSaveMeal: (meal: Meal) => boolean | Promise<boolean>;
   onCancel: () => void;
 }
 
@@ -200,7 +200,7 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
   const calculatedSum = foodItems.reduce((acc, it) => acc + it.calories, 0);
 
   // Trigger Save action
-  const handleSaveMealClick = () => {
+  const handleSaveMealClick = async () => {
     if (isSavingMeal) return;
 
     if (foodItems.length === 0) {
@@ -249,7 +249,10 @@ export const PhotoTab: React.FC<PhotoTabProps> = ({ onSaveMeal, onCancel }) => {
     };
 
     setIsSavingMeal(true);
-    onSaveMeal(generatedMeal);
+    const accepted = await onSaveMeal(generatedMeal);
+    if (!accepted) {
+      setIsSavingMeal(false);
+    }
   };
 
   return (
