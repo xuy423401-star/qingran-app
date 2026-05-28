@@ -203,9 +203,7 @@ export const supabaseService = {
         id: meal.id,
         user_id: userId,
         log_date: dateStr,
-        title: meal.title || null,
         meal_type: meal.type,
-        time: meal.time || null,
         image_url: meal.imageUrl || null,
         total_calories: toSafeNumber(meal.totalCalories),
         created_at: new Date().toISOString()
@@ -229,8 +227,7 @@ export const supabaseService = {
         id: it.id,
         meal_id: meal.id,
         name: it.name,
-        calories: toSafeNumber(it.calories),
-        weight_grams: toSafeOptionalNumber(it.weightGrams) ?? null
+        calories: toSafeNumber(it.calories)
       }));
 
       await supabase.from("meal_items").delete().eq("meal_id", meal.id);
