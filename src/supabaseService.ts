@@ -6,6 +6,11 @@
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import { Meal, UserProfile, DailyDataMap, FoodItem, WeightRecord } from "./types";
 
+export interface SaveResult {
+  ok: boolean;
+  message?: string;
+}
+
 function toSafeNumber(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -76,6 +81,12 @@ function mapMealRowToUi(row: any, itemsByMeal: Record<string, FoodItem[]>): Meal
     totalCalories: toSafeNumber(row.total_calories),
     items
   };
+}
+
+function formatSupabaseError(error: any): string {
+  if (!error) return "Unknown Supabase error";
+  const parts = [error.code, error.message, error.details, error.hint].filter(Boolean);
+  return parts.join(" | ");
 }
 
 function mapProfileRowToUi(row: any, fallbackProfile: UserProfile): UserProfile {
@@ -195,16 +206,19 @@ export const supabaseService = {
     }
   },
 
-  async saveMeal(userId: string, dateStr: string, meal: Meal): Promise<boolean> {
-    if (!isSupabaseConfigured || !supabase) return false;
+  async saveMeal(userId: string, dateStr: string, meal: Meal): Promise<SaveResult> {
+    if (!isSupabaseConfigured || !supabase) {
+      return { ok: false, message: "Supabase is not configured" };
+    }
 
     try {
+      const isDataUrlImage = typeof meal.imageUrl === "string" && meal.imageUrl.startsWith("data:");
       const mealRow = {
         id: meal.id,
         user_id: userId,
         log_date: dateStr,
         meal_type: meal.type,
-        image_url: meal.imageUrl || null,
+        image_url: isDataUrlImage ? null : meal.imageUrl || null,
         total_calories: toSafeNumber(meal.totalCalories),
         created_at: new Date().toISOString()
       };
@@ -214,13 +228,14 @@ export const supabaseService = {
         .upsert(mealRow, { onConflict: "id" });
 
       if (mealError) {
-        console.warn("Supabase save meal row error:", mealError.message);
-        return false;
+        const message = formatSupabaseError(mealError);
+        console.warn("Supabase save meal row error:", message);
+        return { ok: false, message };
       }
 
       const items = Array.isArray(meal.items) ? meal.items : [];
       if (items.length === 0) {
-        return true;
+        return { ok: true };
       }
 
       const itemRows = items.map((it) => ({
@@ -233,30 +248,33 @@ export const supabaseService = {
       await supabase.from("meal_items").delete().eq("meal_id", meal.id);
       const { error: itemsError } = await supabase.from("meal_items").insert(itemRows);
       if (itemsError) {
-        console.warn("Supabase batch save meal_items error:", itemsError.message);
-        return false;
+        const message = formatSupabaseError(itemsError);
+        console.warn("Supabase batch save meal_items error:", message);
+        return { ok: false, message };
       }
 
-      return true;
+      return { ok: true };
     } catch (err) {
       console.warn("Unhandled error saving meal records to Supabase:", err);
-      return false;
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
   },
 
-  async saveMealsBatch(userId: string, dateStr: string, meals: Meal[]): Promise<boolean> {
-    if (!isSupabaseConfigured || !supabase) return false;
-    if (!Array.isArray(meals) || meals.length === 0) return true;
+  async saveMealsBatch(userId: string, dateStr: string, meals: Meal[]): Promise<SaveResult> {
+    if (!isSupabaseConfigured || !supabase) {
+      return { ok: false, message: "Supabase is not configured" };
+    }
+    if (!Array.isArray(meals) || meals.length === 0) return { ok: true };
 
     try {
       for (const meal of meals) {
-        const ok = await this.saveMeal(userId, dateStr, meal);
-        if (!ok) return false;
+        const result = await this.saveMeal(userId, dateStr, meal);
+        if (!result.ok) return result;
       }
-      return true;
+      return { ok: true };
     } catch (err) {
       console.warn("Unhandled error batch syncing meals:", err);
-      return false;
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
   },
 

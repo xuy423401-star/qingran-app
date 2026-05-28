@@ -218,6 +218,22 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [sessionUser, setSessionUser] = useState<any>(null);
 
+  const getActiveUserId = async () => {
+    if (!supabase) return sessionUser?.id ?? null;
+
+    const { data, error } = await supabase.auth.getUser();
+    if (error) {
+      console.warn("Could not refresh current Supabase user:", error.message);
+    }
+
+    const activeUser = data.user ?? sessionUser ?? null;
+    if (activeUser && activeUser.id !== sessionUser?.id) {
+      setSessionUser(activeUser);
+    }
+
+    return activeUser?.id ?? null;
+  };
+
   const loadLocalSnapshot = () => {
     let currentDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1") || INITIAL_DAILY_DATA;
     let storedProfile = safeReadJson<UserProfile>("qingran_user_profile");
@@ -315,8 +331,8 @@ export default function App() {
         // Cloud has not caught up yet: keep local records in UI and backfill once.
         if (hasLocalMeals && resolvedMeals.length > dbMeals.length) {
           const backfilled = await supabaseService.saveMealsBatch(userId, TODAY_STR, resolvedMeals);
-          if (!backfilled) {
-            console.warn("Cloud backfill failed, keeping local data as source of truth for now.");
+          if (!backfilled.ok) {
+            console.warn("Cloud backfill failed, keeping local data as source of truth for now.", backfilled.message);
           }
         }
 
@@ -460,6 +476,27 @@ export default function App() {
 
   // 2. Action: Register newly recognized diet meals from PhotoTab
   const handleSaveMeal = async (newMeal: Meal) => {
+    const nextMealsForSave = [newMeal, ...meals];
+    await saveMeals(nextMealsForSave);
+
+    const activeUserId = await getActiveUserId();
+    if (!activeUserId) {
+      triggerToast("本地已保存，但当前未登录云端账号，请先到我的页面登录");
+      setActiveTab("home");
+      return;
+    }
+
+    const savedToCloudResult = await supabaseService.saveMeal(activeUserId, TODAY_STR, newMeal);
+    if (!savedToCloudResult.ok) {
+      triggerToast(`本地已保存，云端失败：${savedToCloudResult.message || "请检查 Supabase 表或 RLS"}`);
+      setActiveTab("home");
+      return;
+    }
+
+    triggerToast(`已添加并同步到云端 (+${newMeal.totalCalories} kcal)`);
+    setActiveTab("home");
+    return;
+
     const updatedMeals = [newMeal, ...meals];
     await saveMeals(updatedMeals);
 
