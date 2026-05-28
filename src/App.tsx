@@ -41,7 +41,6 @@ const getTodayMonthDayString = () => {
   return `${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 };
 const TODAY_STR = getTodayString();
-const emptyTodayLog = { meals: INITIAL_MEALS, hasCheckedIn: false, totalCalories: 0 };
 const LOCAL_STORAGE_KEYS = [
   "qingran_daily_data_v1",
   "qingran_user_profile",
@@ -197,6 +196,19 @@ const applyDailyStatsToProfile = (
   };
 };
 
+const mergeMealsById = (primaryMeals: Meal[], secondaryMeals: Meal[]) => {
+  const seen = new Set<string>();
+  const merged: Meal[] = [];
+
+  [...primaryMeals, ...secondaryMeals].forEach((meal) => {
+    if (!meal?.id || seen.has(meal.id)) return;
+    seen.add(meal.id);
+    merged.push(meal);
+  });
+
+  return merged;
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>("home");
   const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
@@ -206,21 +218,85 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [sessionUser, setSessionUser] = useState<any>(null);
 
+  const loadLocalSnapshot = () => {
+    let currentDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1") || INITIAL_DAILY_DATA;
+    let storedProfile = safeReadJson<UserProfile>("qingran_user_profile");
+    const storedMeals = safeReadJson<Meal[]>("qingran_meals_log");
+
+    if (shouldResetLegacyGuestData(storedProfile, currentDailyData, storedMeals)) {
+      clearLocalAppData();
+      currentDailyData = INITIAL_DAILY_DATA;
+      storedProfile = null;
+    }
+
+    const fallbackMeals = Array.isArray(storedMeals) ? storedMeals : [];
+    const todayLogFromMap = currentDailyData[TODAY_STR];
+    const todayMealsFromMap = Array.isArray(todayLogFromMap?.meals) ? todayLogFromMap.meals : [];
+    const todayMeals = todayMealsFromMap.length > 0 ? todayMealsFromMap : fallbackMeals;
+    const todayCheckedIn = Boolean(
+      todayLogFromMap?.hasCheckedIn ||
+      storedProfile?.hasCheckedInToday ||
+      storedProfile?.lastCheckInDate === TODAY_STR
+    );
+    const todayTotalCalories = todayMeals.reduce((sum, meal) => sum + (Number(meal.totalCalories) || 0), 0);
+    const normalizedDailyData: DailyDataMap = {
+      ...currentDailyData,
+      [TODAY_STR]: {
+        meals: todayMeals,
+        hasCheckedIn: todayCheckedIn,
+        totalCalories: todayTotalCalories
+      }
+    };
+    const nextProfile = storedProfile
+      ? { ...DEFAULT_USER_PROFILE, ...storedProfile }
+      : DEFAULT_USER_PROFILE;
+
+    return {
+      dailyData: normalizedDailyData,
+      meals: todayMeals,
+      profile: nextProfile,
+      hasCheckedInToday: todayCheckedIn
+    };
+  };
+
+  const applyLocalSnapshotToState = () => {
+    const localSnapshot = loadLocalSnapshot();
+    localStorage.setItem("qingran_daily_data_v1", JSON.stringify(localSnapshot.dailyData));
+    localStorage.setItem("qingran_user_profile", JSON.stringify(localSnapshot.profile));
+    localStorage.setItem("qingran_meals_log", JSON.stringify(localSnapshot.meals));
+
+    setDailyData(localSnapshot.dailyData);
+    setMeals(localSnapshot.meals);
+    setUserProfile(
+      applyDailyStatsToProfile(localSnapshot.profile, localSnapshot.dailyData, localSnapshot.hasCheckedInToday)
+    );
+  };
+
   // Load data for the specified user or fallback to guest model
   const loadData = async (userId: string | null) => {
     try {
       if (userId && supabase) {
+        const localSnapshot = loadLocalSnapshot();
         const dbProfile = await supabaseService.fetchProfile(userId, DEFAULT_USER_PROFILE);
         const todayCheckedIn = await supabaseService.fetchCheckInStatus(userId, TODAY_STR);
-        const resolvedTodayCheckedIn = todayCheckedIn || getCachedTodayCheckedIn();
         const dbMeals = await supabaseService.fetchTodayMeals(userId, TODAY_STR);
         const dbDailyMap = await supabaseService.fetchDailyDataMap(userId, INITIAL_DAILY_DATA);
         const dbWeightLogs = await supabaseService.fetchWeightLogs(userId);
-        const todayCalories = dbMeals.reduce((sum, meal) => sum + meal.totalCalories, 0);
+
+        const mergedMeals = mergeMealsById(localSnapshot.meals, dbMeals);
+        const hasCloudMeals = dbMeals.length > 0;
+        const hasLocalMeals = localSnapshot.meals.length > 0;
+        const resolvedMeals = mergedMeals.length > 0 ? mergedMeals : dbMeals;
+        const resolvedTodayCheckedIn = Boolean(
+          todayCheckedIn ||
+          localSnapshot.hasCheckedInToday ||
+          getCachedTodayCheckedIn()
+        );
+        const todayCalories = resolvedMeals.reduce((sum, meal) => sum + (Number(meal.totalCalories) || 0), 0);
         const normalizedDailyMap = {
           ...dbDailyMap,
           [TODAY_STR]: {
-            meals: dbMeals,
+            meals: resolvedMeals,
             hasCheckedIn: resolvedTodayCheckedIn,
             totalCalories: todayCalories
           }
@@ -236,33 +312,26 @@ export default function App() {
           await supabaseService.saveCheckInStatus(userId, TODAY_STR, true);
         }
 
-        setUserProfile(applyDailyStatsToProfile(profileWithCloudWeight, normalizedDailyMap, resolvedTodayCheckedIn));
-        setMeals(dbMeals);
-        setDailyData(normalizedDailyMap);
-      } else {
-        let currentDailyData = safeReadJson<DailyDataMap>("qingran_daily_data_v1") || INITIAL_DAILY_DATA;
-        let storedProfile = safeReadJson<UserProfile>("qingran_user_profile");
-        const storedMeals = safeReadJson<Meal[]>("qingran_meals_log");
-
-        if (shouldResetLegacyGuestData(storedProfile, currentDailyData, storedMeals)) {
-          clearLocalAppData();
-          currentDailyData = INITIAL_DAILY_DATA;
-          storedProfile = null;
+        // Cloud has not caught up yet: keep local records in UI and backfill once.
+        if (hasLocalMeals && resolvedMeals.length > dbMeals.length) {
+          const backfilled = await supabaseService.saveMealsBatch(userId, TODAY_STR, resolvedMeals);
+          if (!backfilled) {
+            console.warn("Cloud backfill failed, keeping local data as source of truth for now.");
+          }
         }
 
-        localStorage.setItem("qingran_daily_data_v1", JSON.stringify(currentDailyData));
-        setDailyData(currentDailyData);
+        localStorage.setItem("qingran_daily_data_v1", JSON.stringify(normalizedDailyMap));
+        localStorage.setItem("qingran_meals_log", JSON.stringify(resolvedMeals));
 
-        const todayLog = currentDailyData[TODAY_STR] || emptyTodayLog;
-        setMeals(todayLog.meals);
-
-        const nextProfile = storedProfile
-          ? { ...DEFAULT_USER_PROFILE, ...storedProfile }
-          : DEFAULT_USER_PROFILE;
-        setUserProfile(applyDailyStatsToProfile(nextProfile, currentDailyData, todayLog.hasCheckedIn));
+        setUserProfile(applyDailyStatsToProfile(profileWithCloudWeight, normalizedDailyMap, resolvedTodayCheckedIn));
+        setMeals(resolvedMeals);
+        setDailyData(normalizedDailyMap);
+      } else {
+        applyLocalSnapshotToState();
       }
     } catch (e) {
       console.warn("Failed to retrieve dataset comfortably, fallback to static values working fine:", e);
+      applyLocalSnapshotToState();
     }
   };
 
